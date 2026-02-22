@@ -1,0 +1,829 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Sunset Drift - Free HTML5 Game</title>
+  <meta name="description" content="Play Sunset Drift - Swipe to dodge obstacles while the screen slowly rotates in pastel sunset tones.">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#ffb36b">
+  <!-- Open Graph -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Sunset Drift - Free HTML5 Game">
+  <meta property="og:description" content="Play Sunset Drift - Swipe to dodge obstacles while the screen slowly rotates in pastel sunset tones.">
+  <meta property="og:url" content="https://balinti.github.io/sunset-drift/">
+  <meta property="og:image" content="https://balinti.github.io/sunset-drift/og.png">
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Sunset Drift - Free HTML5 Game">
+  <meta name="twitter:description" content="Play Sunset Drift - Swipe to dodge obstacles while the screen slowly rotates in pastel sunset tones.">
+  <meta name="twitter:image" content="https://balinti.github.io/sunset-drift/og.png">
+  <!-- AdSense -->
+  <script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-4099346100621490" crossorigin="anonymous"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      background: #0a0612;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: flex-start;
+      overflow: hidden;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #fff;
+    }
+    #game-wrap {
+      position: relative;
+      width: 100%;
+      max-width: 420px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    #game-canvas {
+      display: block;
+      width: 100%;
+      touch-action: manipulation;
+      cursor: pointer;
+    }
+    #how-to-play {
+      max-width: 420px;
+      width: 100%;
+      padding: 12px 16px 80px;
+      font-size: 12px;
+      color: #a07060;
+      line-height: 1.6;
+      text-align: center;
+    }
+    #how-to-play h2 { font-size: 13px; color: #c09070; margin-bottom: 4px; }
+    #share-btn {
+      display: none;
+      position: absolute;
+      bottom: 90px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(255,179,107,0.18);
+      border: 1px solid rgba(255,179,107,0.4);
+      color: #ffb36b;
+      padding: 8px 22px;
+      border-radius: 20px;
+      font-size: 13px;
+      cursor: pointer;
+      letter-spacing: 0.5px;
+      z-index: 10;
+    }
+    #share-btn:active { background: rgba(255,179,107,0.3); }
+  </style>
+</head>
+<body>
+<div id="game-wrap">
+  <canvas id="game-canvas"></canvas>
+  <button id="share-btn">Share Score</button>
+</div>
+<div id="how-to-play">
+  <h2>How to Play</h2>
+  Tap or press Space to flip lanes. Dodge shadow obstacles on the ring.
+  Stay inside the Golden Light Arc for higher points and multiplier.
+  Near-miss a wedge edge for bonus points!
+</div>
+<script>
+(function() {
+'use strict';
+
+// --- Constants ---
+const CANVAS = document.getElementById('game-canvas');
+const CTX = CANVAS.getContext('2d');
+const WRAP = document.getElementById('game-wrap');
+const SHARE_BTN = document.getElementById('share-btn');
+const LS_KEY = 'sd_high';
+
+const STATE = { START: 0, PLAY: 1, OVER: 2 };
+
+// --- Game State ---
+let state = STATE.START;
+let score = 0;
+let best = parseInt(localStorage.getItem(LS_KEY) || '0');
+let mult = 1;
+let multPeak = 1;
+let streak = 0;
+let t = 0; // elapsed play seconds
+let lastTs = 0;
+let animId;
+
+// Player
+let playerTheta = -Math.PI / 2;
+let playerLane = 0; // 0=outer, 1=inner
+let playerOmega = 2.6;
+let invuln = 0; // invulnerability timer after flip
+
+// Golden arc
+let goldTheta = -Math.PI / 2 + 0.6; // start slightly ahead
+let goldWidth = 1.35;
+let goldOmega = 0.9;
+let inGold = false;
+
+// Obstacles
+let obstacles = [];
+let spawnTimer = 0;
+
+// Particles
+let particles = [];
+
+// Shake
+let shakeAmt = 0;
+let shakeDec = 0.88;
+
+// Death freeze
+let freezeTimer = 0;
+let frozen = false;
+
+// Dimensions
+let W, H, DPR, cx, cy, R_OUT, R_IN;
+
+// Hue cycling
+let bgHue = 20;
+
+// --- Resize ---
+function resize() {
+  const maxW = 420, maxH = 750;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  let cw = Math.min(vw, maxW);
+  let ch = Math.min(Math.round(cw * maxH / maxW), vh - 80);
+  cw = Math.round(ch * maxW / maxH);
+
+  DPR = Math.min(window.devicePixelRatio || 1, 2.5);
+  CANVAS.width = Math.round(cw * DPR);
+  CANVAS.height = Math.round(ch * DPR);
+  CANVAS.style.width = cw + 'px';
+  CANVAS.style.height = ch + 'px';
+
+  W = cw; H = ch;
+  cx = W * 0.5;
+  cy = H * 0.52;
+  R_OUT = Math.min(W, H) * 0.34;
+  R_IN = R_OUT - 26;
+}
+
+// --- Math helpers ---
+function angDiff(a, b) {
+  let d = ((a - b) % (Math.PI * 2) + Math.PI * 3) % (Math.PI * 2) - Math.PI;
+  return d;
+}
+function angWrap(a) {
+  return ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+}
+
+// --- Particle helpers ---
+function spawnSpark(x, y, count, speed, hue, life) {
+  for (let i = 0; i < count; i++) {
+    const ang = Math.random() * Math.PI * 2;
+    const spd = speed * (0.4 + Math.random() * 0.6);
+    particles.push({
+      x, y,
+      vx: Math.cos(ang) * spd,
+      vy: Math.sin(ang) * spd,
+      life: life * (0.6 + Math.random() * 0.5),
+      maxLife: life,
+      hue: hue + (Math.random() - 0.5) * 30,
+      size: 2 + Math.random() * 3,
+      gravity: 60
+    });
+  }
+}
+
+function spawnDeathBurst(px, py) {
+  spawnSpark(px, py, 36, 280, bgHue + 20, 1.1);
+  // ring shards
+  for (let i = 0; i < 14; i++) {
+    const ang = (i / 14) * Math.PI * 2;
+    const r = R_OUT * (0.85 + Math.random() * 0.2);
+    const sx = cx + Math.cos(ang) * r;
+    const sy = cy + Math.sin(ang) * r;
+    spawnSpark(sx, sy, 2, 120, bgHue + 40, 0.8);
+  }
+}
+
+function spawnFlipSpark() {
+  const r = playerLane === 0 ? R_OUT : R_IN;
+  const px = cx + Math.cos(playerTheta) * r;
+  const py = cy + Math.sin(playerTheta) * r;
+  spawnSpark(px, py, 6, 100, bgHue + 60, 0.4);
+}
+
+// --- Obstacle spawn ---
+function spawnObstacle() {
+  const spawnLead = 2.6;
+  const baseTheta = angWrap(playerTheta + spawnLead);
+  const halfW = Math.min(0.30, 0.18 + 0.0016 * t);
+
+  // Lane mask
+  let laneMask;
+  if (t < 45) {
+    laneMask = Math.random() < 0.5 ? 1 : 2; // bit 0=outer, bit 1=inner
+  } else {
+    const p = Math.random();
+    if (p < 0.08) laneMask = 3; // both lanes (narrow)
+    else laneMask = Math.random() < 0.5 ? 1 : 2;
+  }
+  const actualHalfW = (laneMask === 3) ? halfW * 0.7 : halfW;
+
+  obstacles.push({ theta: baseTheta, halfWidth: actualHalfW, laneMask, dead: false });
+
+  // Double shadow sets after 25s
+  if (t > 25) {
+    const prob = Math.min(0.35, (t - 25) / 60);
+    if (Math.random() < prob) {
+      const theta2 = angWrap(baseTheta + 0.55);
+      let lm2 = Math.random() < 0.5 ? 1 : 2;
+      obstacles.push({ theta: theta2, halfWidth: actualHalfW * 0.9, laneMask: lm2, dead: false });
+    }
+  }
+}
+
+// --- Reset ---
+function resetGame() {
+  score = 0;
+  mult = 1;
+  multPeak = 1;
+  streak = 0;
+  t = 0;
+  playerTheta = -Math.PI / 2;
+  playerLane = 0;
+  playerOmega = 2.6;
+  invuln = 0;
+  goldTheta = -Math.PI / 2 + 0.9;
+  goldWidth = 1.35;
+  goldOmega = 0.9;
+  obstacles = [];
+  particles = [];
+  spawnTimer = 0;
+  shakeAmt = 0;
+  frozen = false;
+  freezeTimer = 0;
+  bgHue = 20;
+  inGold = false;
+}
+
+// --- Flip lane ---
+function flipLane() {
+  if (state === STATE.PLAY && !frozen) {
+    playerLane = playerLane === 0 ? 1 : 0;
+    invuln = 0.06;
+    shakeAmt = Math.max(shakeAmt, 2.5);
+    spawnFlipSpark();
+  } else if (state === STATE.START) {
+    startGame();
+  } else if (state === STATE.OVER && !frozen) {
+    startGame();
+  }
+}
+
+function startGame() {
+  resetGame();
+  state = STATE.PLAY;
+  SHARE_BTN.style.display = 'none';
+}
+
+// --- Input ---
+CANVAS.addEventListener('pointerdown', function(e) {
+  e.preventDefault();
+  flipLane();
+}, { passive: false });
+
+window.addEventListener('keydown', function(e) {
+  if (e.code === 'Space' || e.code === 'Enter') {
+    e.preventDefault();
+    flipLane();
+  }
+});
+
+SHARE_BTN.addEventListener('click', function() {
+  const txt = `I scored ${score} in Sunset Drift! Play at https://balinti.github.io/sunset-drift/`;
+  if (navigator.share) {
+    navigator.share({ title: 'Sunset Drift', text: txt, url: 'https://balinti.github.io/sunset-drift/' }).catch(() => {});
+  } else {
+    navigator.clipboard && navigator.clipboard.writeText(txt).then(() => {
+      SHARE_BTN.textContent = 'Copied!';
+      setTimeout(() => { SHARE_BTN.textContent = 'Share Score'; }, 1500);
+    });
+  }
+});
+
+window.addEventListener('resize', resize);
+
+// --- Draw helpers ---
+function drawRing(r, color, lineW) {
+  CTX.beginPath();
+  CTX.arc(cx, cy, r, 0, Math.PI * 2);
+  CTX.strokeStyle = color;
+  CTX.lineWidth = lineW;
+  CTX.stroke();
+}
+
+function drawArc(r, startA, endA, color, lineW) {
+  CTX.beginPath();
+  CTX.arc(cx, cy, r, startA, endA);
+  CTX.strokeStyle = color;
+  CTX.lineWidth = lineW;
+  CTX.stroke();
+}
+
+function drawObstacle(ob) {
+  const rMid = (R_OUT + R_IN) * 0.5;
+  const rHalf = (R_OUT - R_IN) * 0.5;
+  const laneW = R_OUT - R_IN;
+
+  CTX.save();
+  // Clip to annular sector
+  const st = ob.theta - ob.halfWidth;
+  const en = ob.theta + ob.halfWidth;
+
+  // Draw for each lane
+  for (let lane = 0; lane < 2; lane++) {
+    const bit = lane === 0 ? 1 : 2;
+    if (!(ob.laneMask & bit)) continue;
+    const innerR = lane === 0 ? R_IN : R_IN - (R_OUT - R_IN);
+    const outerR = lane === 0 ? R_OUT : R_IN;
+
+    CTX.beginPath();
+    CTX.arc(cx, cy, outerR, st, en);
+    CTX.arc(cx, cy, innerR, en, st, true);
+    CTX.closePath();
+    const grad = CTX.createRadialGradient(cx, cy, innerR, cx, cy, outerR);
+    grad.addColorStop(0, 'rgba(10,5,20,0.92)');
+    grad.addColorStop(0.5, 'rgba(30,10,50,0.96)');
+    grad.addColorStop(1, 'rgba(10,5,20,0.92)');
+    CTX.fillStyle = grad;
+    CTX.fill();
+    // Edge glow
+    CTX.strokeStyle = 'rgba(180,60,255,0.5)';
+    CTX.lineWidth = 1.5;
+    CTX.stroke();
+  }
+  CTX.restore();
+}
+
+function drawPlayer() {
+  const r = playerLane === 0 ? (R_OUT + R_IN) / 2 : (R_IN + R_IN - (R_OUT - R_IN)) / 2;
+  // Actually compute midpoints of each lane band properly
+  const laneW = R_OUT - R_IN;
+  const rPos = playerLane === 0 ? R_IN + laneW * 0.5 : R_IN - laneW * 0.5;
+  const px = cx + Math.cos(playerTheta) * rPos;
+  const py = cy + Math.sin(playerTheta) * rPos;
+
+  // Glow
+  const grd = CTX.createRadialGradient(px, py, 0, px, py, 14);
+  grd.addColorStop(0, `hsla(${bgHue + 40},100%,80%,0.9)`);
+  grd.addColorStop(0.4, `hsla(${bgHue + 20},100%,60%,0.5)`);
+  grd.addColorStop(1, 'transparent');
+  CTX.beginPath();
+  CTX.arc(px, py, 14, 0, Math.PI * 2);
+  CTX.fillStyle = grd;
+  CTX.fill();
+
+  // Core dot
+  CTX.beginPath();
+  CTX.arc(px, py, 6, 0, Math.PI * 2);
+  CTX.fillStyle = `hsl(${bgHue + 50},100%,88%)`;
+  CTX.fill();
+
+  // Inner dot
+  CTX.beginPath();
+  CTX.arc(px, py, 3, 0, Math.PI * 2);
+  CTX.fillStyle = '#fff';
+  CTX.fill();
+}
+
+function drawGoldArc() {
+  const halfG = goldWidth * 0.5;
+  const st = goldTheta - halfG;
+  const en = goldTheta + halfG;
+  const laneW = R_OUT - R_IN;
+
+  // Outer glow band
+  CTX.save();
+  CTX.beginPath();
+  CTX.arc(cx, cy, R_OUT + 4, st, en);
+  CTX.arc(cx, cy, R_IN - 4, en, st, true);
+  CTX.closePath();
+  const grad = CTX.createRadialGradient(cx, cy, R_IN - 4, cx, cy, R_OUT + 4);
+  grad.addColorStop(0, 'rgba(255,200,60,0.08)');
+  grad.addColorStop(0.3, 'rgba(255,180,40,0.18)');
+  grad.addColorStop(0.7, 'rgba(255,160,20,0.18)');
+  grad.addColorStop(1, 'rgba(255,140,0,0.08)');
+  CTX.fillStyle = grad;
+  CTX.fill();
+  CTX.restore();
+
+  // Main arc strokes
+  const alpha = 0.55 + 0.2 * Math.sin(Date.now() * 0.003);
+  CTX.save();
+  CTX.shadowColor = `rgba(255,200,60,0.6)`;
+  CTX.shadowBlur = 12;
+  drawArc(R_OUT, st, en, `rgba(255,210,80,${alpha})`, 3.5);
+  drawArc(R_IN, st, en, `rgba(255,180,40,${alpha})`, 2.5);
+  CTX.restore();
+}
+
+function drawParticles() {
+  CTX.save();
+  for (const p of particles) {
+    const a = p.life / p.maxLife;
+    CTX.globalAlpha = a;
+    CTX.beginPath();
+    CTX.arc(p.x, p.y, p.size * a, 0, Math.PI * 2);
+    CTX.fillStyle = `hsl(${p.hue},90%,70%)`;
+    CTX.fill();
+  }
+  CTX.globalAlpha = 1;
+  CTX.restore();
+}
+
+function drawHUD() {
+  // Score
+  CTX.save();
+  CTX.font = `bold ${Math.round(H * 0.045)}px 'Segoe UI', sans-serif`;
+  CTX.fillStyle = 'rgba(255,255,255,0.9)';
+  CTX.textAlign = 'left';
+  CTX.textBaseline = 'top';
+  CTX.fillText(Math.floor(score), 18, 18);
+
+  // Multiplier
+  CTX.textAlign = 'right';
+  CTX.font = `bold ${Math.round(H * 0.038)}px 'Segoe UI', sans-serif`;
+  const mColor = mult >= 4 ? '#ffd060' : mult >= 2 ? '#ff9040' : 'rgba(255,255,255,0.7)';
+  CTX.fillStyle = mColor;
+  CTX.fillText(`×${mult.toFixed(1)}`, W - 18, 18);
+
+  // Best
+  if (best > 0) {
+    CTX.font = `${Math.round(H * 0.028)}px 'Segoe UI', sans-serif`;
+    CTX.fillStyle = 'rgba(255,200,120,0.5)';
+    CTX.fillText(`Best ${best}`, W - 18, 18 + Math.round(H * 0.042));
+  }
+
+  // In-gold indicator
+  if (inGold && state === STATE.PLAY) {
+    CTX.textAlign = 'center';
+    CTX.font = `${Math.round(H * 0.028)}px 'Segoe UI', sans-serif`;
+    CTX.fillStyle = 'rgba(255,220,60,0.85)';
+    CTX.fillText('GOLDEN', W * 0.5, 18);
+  }
+  CTX.restore();
+}
+
+function drawStart() {
+  // Background gradient
+  const bg = CTX.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H));
+  bg.addColorStop(0, `hsla(${bgHue + 10},60%,18%,1)`);
+  bg.addColorStop(1, `hsla(${bgHue - 10},40%,5%,1)`);
+  CTX.fillStyle = bg;
+  CTX.fillRect(0, 0, W, H);
+
+  drawRingScene();
+
+  // Title
+  CTX.save();
+  CTX.textAlign = 'center';
+  CTX.textBaseline = 'middle';
+
+  const titleY = cy - R_OUT - 50;
+
+  // Title glow
+  CTX.shadowColor = `hsl(${bgHue + 30},100%,60%)`;
+  CTX.shadowBlur = 30;
+  CTX.font = `bold ${Math.round(H * 0.072)}px 'Segoe UI', sans-serif`;
+  CTX.fillStyle = `hsl(${bgHue + 20},100%,78%)`;
+  CTX.fillText('SUNSET', cx, titleY);
+  CTX.font = `bold ${Math.round(H * 0.058)}px 'Segoe UI', sans-serif`;
+  CTX.fillStyle = `hsl(${bgHue + 40},100%,88%)`;
+  CTX.fillText('DRIFT', cx, titleY + Math.round(H * 0.078));
+  CTX.shadowBlur = 0;
+
+  // Subtitle
+  CTX.font = `${Math.round(H * 0.028)}px 'Segoe UI', sans-serif`;
+  CTX.fillStyle = 'rgba(255,200,140,0.7)';
+  CTX.fillText('Golden Lane', cx, titleY + Math.round(H * 0.14));
+
+  // Tap to start pulse
+  const pulse = 0.7 + 0.3 * Math.sin(Date.now() * 0.003);
+  CTX.globalAlpha = pulse;
+  CTX.font = `${Math.round(H * 0.038)}px 'Segoe UI', sans-serif`;
+  CTX.fillStyle = '#fff';
+  CTX.fillText('Tap to Start', cx, cy + R_OUT + 50);
+  CTX.globalAlpha = 1;
+
+  // Best
+  if (best > 0) {
+    CTX.font = `${Math.round(H * 0.030)}px 'Segoe UI', sans-serif`;
+    CTX.fillStyle = 'rgba(255,200,80,0.6)';
+    CTX.fillText(`Best: ${best}`, cx, cy + R_OUT + 92);
+  }
+  CTX.restore();
+}
+
+function drawGameOver() {
+  const overlay = CTX.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H) * 0.8);
+  overlay.addColorStop(0, 'rgba(10,2,20,0.82)');
+  overlay.addColorStop(1, 'rgba(5,1,10,0.92)');
+  CTX.fillStyle = overlay;
+  CTX.fillRect(0, 0, W, H);
+
+  CTX.save();
+  CTX.textAlign = 'center';
+  CTX.textBaseline = 'middle';
+
+  const midY = cy - 20;
+
+  CTX.font = `bold ${Math.round(H * 0.058)}px 'Segoe UI', sans-serif`;
+  CTX.fillStyle = 'rgba(255,100,80,0.95)';
+  CTX.shadowColor = 'rgba(255,80,60,0.7)';
+  CTX.shadowBlur = 20;
+  CTX.fillText('GAME OVER', cx, midY - 55);
+  CTX.shadowBlur = 0;
+
+  CTX.font = `bold ${Math.round(H * 0.085)}px 'Segoe UI', sans-serif`;
+  CTX.fillStyle = '#fff';
+  CTX.fillText(Math.floor(score), cx, midY + 10);
+
+  CTX.font = `${Math.round(H * 0.030)}px 'Segoe UI', sans-serif`;
+  CTX.fillStyle = 'rgba(255,200,100,0.7)';
+  CTX.fillText(`Best: ${best}`, cx, midY + 60);
+
+  if (multPeak > 1) {
+    CTX.font = `${Math.round(H * 0.026)}px 'Segoe UI', sans-serif`;
+    CTX.fillStyle = 'rgba(255,210,80,0.6)';
+    CTX.fillText(`Peak ×${multPeak.toFixed(1)}`, cx, midY + 88);
+  }
+
+  const pulse2 = 0.65 + 0.35 * Math.sin(Date.now() * 0.0035);
+  CTX.globalAlpha = pulse2;
+  CTX.font = `${Math.round(H * 0.036)}px 'Segoe UI', sans-serif`;
+  CTX.fillStyle = '#fff';
+  CTX.fillText('Tap to Retry', cx, midY + 130);
+  CTX.globalAlpha = 1;
+  CTX.restore();
+}
+
+function drawBackground() {
+  const bg = CTX.createRadialGradient(cx, cy, 0, cx, cy, Math.max(W, H));
+  bg.addColorStop(0, `hsla(${bgHue + 5},55%,14%,1)`);
+  bg.addColorStop(0.6, `hsla(${bgHue},45%,8%,1)`);
+  bg.addColorStop(1, `hsla(${bgHue - 10},35%,4%,1)`);
+  CTX.fillStyle = bg;
+  CTX.fillRect(0, 0, W, H);
+}
+
+function drawRingScene() {
+  // Outer ring glow
+  CTX.save();
+  CTX.shadowColor = `hsla(${bgHue + 20},80%,50%,0.3)`;
+  CTX.shadowBlur = 16;
+  drawRing(R_OUT, `hsla(${bgHue + 10},60%,30%,0.5)`, 2);
+  drawRing(R_IN, `hsla(${bgHue + 5},50%,25%,0.4)`, 1.5);
+  CTX.restore();
+
+  // Lane fill
+  CTX.beginPath();
+  CTX.arc(cx, cy, R_OUT, 0, Math.PI * 2);
+  CTX.arc(cx, cy, R_IN, Math.PI * 2, 0, true);
+  CTX.fillStyle = `hsla(${bgHue},30%,15%,0.18)`;
+  CTX.fill();
+
+  // Inner lane fill
+  const laneW = R_OUT - R_IN;
+  CTX.beginPath();
+  CTX.arc(cx, cy, R_IN, 0, Math.PI * 2);
+  CTX.arc(cx, cy, R_IN - laneW, Math.PI * 2, 0, true);
+  CTX.fillStyle = `hsla(${bgHue},25%,12%,0.12)`;
+  CTX.fill();
+
+  drawRing(R_IN - laneW, `hsla(${bgHue},40%,20%,0.3)`, 1);
+}
+
+// --- Update ---
+function update(dt) {
+  if (frozen) {
+    freezeTimer -= dt;
+    // Update particles during freeze
+    updateParticles(dt);
+    if (freezeTimer <= 0) {
+      frozen = false;
+      state = STATE.OVER;
+      // Save best
+      if (score > best) {
+        best = Math.floor(score);
+        localStorage.setItem(LS_KEY, best);
+      }
+      SHARE_BTN.style.display = 'block';
+    }
+    return;
+  }
+
+  if (state !== STATE.PLAY) {
+    updateParticles(dt);
+    bgHue = (bgHue + 4 * dt) % 360;
+    return;
+  }
+
+  t += dt;
+  bgHue = (bgHue + 8 * dt) % 360;
+
+  // Player omega increases over time
+  playerOmega = 2.6 + 0.012 * t;
+  playerTheta = angWrap(playerTheta + playerOmega * dt);
+
+  // Invuln
+  if (invuln > 0) invuln -= dt;
+
+  // Gold arc
+  goldOmega = 0.9 + 0.010 * t;
+  goldWidth = Math.max(0.72, Math.min(1.35, 1.35 - 0.006 * t));
+  goldTheta = angWrap(goldTheta + goldOmega * dt);
+
+  // Check if player in gold arc
+  const dGold = Math.abs(angDiff(playerTheta, goldTheta));
+  inGold = dGold < goldWidth * 0.5;
+
+  // Spawn
+  const spawnEvery = Math.max(0.42, Math.min(1.05, 1.05 - 0.008 * t));
+  spawnTimer += dt;
+  if (spawnTimer >= spawnEvery) {
+    spawnTimer = 0;
+    spawnObstacle();
+  }
+
+  // Obstacle speed
+  const obSpeed = 2.2 + 0.028 * t;
+
+  // Update obstacles
+  let playerHit = false;
+  let nearMissBonus = false;
+  const laneW = R_OUT - R_IN;
+  const rPos = playerLane === 0 ? R_IN + laneW * 0.5 : R_IN - laneW * 0.5;
+
+  for (let i = obstacles.length - 1; i >= 0; i--) {
+    const ob = obstacles[i];
+    if (ob.dead) { obstacles.splice(i, 1); continue; }
+
+    // Move obstacle toward player (player moves forward = obstacles approach from ahead)
+    // Actually obstacles slide toward player: decrease theta gap
+    // Obstacles at spawnLead ahead; they approach as both move, obstacles faster
+    ob.theta = angWrap(ob.theta - obSpeed * dt);
+
+    // Check if passed player (behind by > 0.3 rad)
+    const d = angDiff(playerTheta, ob.theta); // positive = player ahead of ob
+
+    if (d > ob.halfWidth + 0.35) {
+      ob.dead = true;
+      continue;
+    }
+
+    // Collision check
+    if (invuln <= 0) {
+      const angOverlap = Math.abs(d) <= ob.halfWidth;
+      const playerLaneBit = playerLane === 0 ? 1 : 2;
+      const laneOverlap = !!(ob.laneMask & playerLaneBit);
+
+      if (angOverlap && laneOverlap) {
+        playerHit = true;
+        break;
+      }
+
+      // Near-miss check (just barely cleared)
+      const edgeDist = Math.abs(Math.abs(d) - ob.halfWidth);
+      if (!angOverlap && laneOverlap && edgeDist <= 0.04 && d > 0 && !ob.nearMissed) {
+        ob.nearMissed = true;
+        nearMissBonus = true;
+      }
+    }
+  }
+
+  // Scoring
+  if (inGold) {
+    score += 2 * mult * dt * 10; // continuous scoring
+    mult = Math.min(8, mult + 0.18 * dt * 5);
+    streak += dt;
+    if (streak > 0.1) {
+      // Emit gold particles occasionally
+      if (Math.random() < 0.3) {
+        const px = cx + Math.cos(playerTheta) * rPos;
+        const py = cy + Math.sin(playerTheta) * rPos;
+        spawnSpark(px, py, 1, 60, bgHue + 40, 0.5);
+      }
+    }
+  } else {
+    score += 1 * dt * 10;
+    mult = Math.max(1, mult - 0.22 * dt * 3);
+    streak = 0;
+  }
+  mult = Math.min(8, mult);
+  if (mult > multPeak) multPeak = mult;
+
+  // Near-miss bonus
+  if (nearMissBonus) {
+    score += 5 * mult;
+    shakeAmt = Math.max(shakeAmt, 4);
+    // Golden burst at player pos
+    const px = cx + Math.cos(playerTheta) * rPos;
+    const py = cy + Math.sin(playerTheta) * rPos;
+    spawnSpark(px, py, 10, 140, bgHue + 40, 0.6);
+  }
+
+  // Death
+  if (playerHit) {
+    const px = cx + Math.cos(playerTheta) * rPos;
+    const py = cy + Math.sin(playerTheta) * rPos;
+    spawnDeathBurst(px, py);
+    shakeAmt = 14;
+    frozen = true;
+    freezeTimer = 0.10;
+    state = STATE.PLAY; // keep playing state during freeze
+  }
+
+  // Shake decay
+  shakeAmt *= Math.pow(shakeDec, dt * 60);
+  if (shakeAmt < 0.1) shakeAmt = 0;
+
+  updateParticles(dt);
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    p.vy += p.gravity * dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= 0.97;
+    p.vy *= 0.97;
+  }
+}
+
+// --- Draw ---
+function draw() {
+  CTX.setTransform(DPR, 0, 0, DPR, 0, 0);
+  CTX.clearRect(0, 0, W, H);
+
+  // Shake transform
+  let sx = 0, sy = 0;
+  if (shakeAmt > 0.1) {
+    sx = (Math.random() * 2 - 1) * shakeAmt;
+    sy = (Math.random() * 2 - 1) * shakeAmt;
+  }
+  CTX.save();
+  CTX.translate(sx, sy);
+
+  drawBackground();
+  drawRingScene();
+
+  if (state === STATE.START) {
+    // draw decorative player
+    drawGoldArc();
+    drawPlayer();
+    CTX.restore();
+    drawStart();
+    return;
+  }
+
+  // Game / Gameover
+  drawGoldArc();
+
+  // Draw obstacles
+  for (const ob of obstacles) {
+    if (!ob.dead) drawObstacle(ob);
+  }
+
+  drawPlayer();
+  drawParticles();
+
+  CTX.restore();
+
+  drawHUD();
+
+  if (state === STATE.OVER) {
+    drawGameOver();
+  }
+}
+
+// --- Main loop ---
+function loop(ts) {
+  if (!lastTs) lastTs = ts;
+  let dt = (ts - lastTs) / 1000;
+  lastTs = ts;
+  dt = Math.min(dt, 0.033);
+
+  update(dt);
+  draw();
+
+  animId = requestAnimationFrame(loop);
+}
+
+// --- Init ---
+resize();
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
